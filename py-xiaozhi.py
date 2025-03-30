@@ -114,34 +114,37 @@ def send_audio():
     # 初始化Opus编码器
     encoder = opuslib.Encoder(16000, 1, opuslib.APPLICATION_AUDIO)
     # 打开麦克风流, 帧大小，应该与Opus帧大小匹配
-    mic = audio.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=960)
     try:
+        mic = audio.open(format=pyaudio.paInt16, channels=1, rate=16000, input=True, frames_per_buffer=960)
         while True:
             if listen_state == "stop":
+                time.sleep(0.1)  # 添加了sleep以减少CPU使用率
                 continue
-                time.sleep(0.1)
             # 读取音频数据
             data = mic.read(960)
             # 编码音频数据
             encoded_data = encoder.encode(data, 960)
-            # 打印音频数据
-            # print(f"Encoded data: {len(encoded_data)}")
             # nonce插入data.size local_sequence_
             local_sequence += 1
             new_nonce = nonce[0:4] + format(len(encoded_data), '04x') + nonce[8:24] + format(local_sequence, '08x')
             # 加密数据，添加nonce
             encrypt_encoded_data = aes_ctr_encrypt(bytes.fromhex(key), bytes.fromhex(new_nonce), bytes(encoded_data))
             data = bytes.fromhex(new_nonce) + encrypt_encoded_data
-            sent = udp_socket.sendto(data, (server_ip, server_port))
+            if udp_socket:  # 添加对socket是否存在的检查
+                # 使用send而不是sendto，因为socket已经连接
+                sent = udp_socket.send(data)
     except Exception as e:
         print(f"send audio err: {e}")
     finally:
         print("send audio exit()")
         local_sequence = 0
-        udp_socket = None
         # 关闭流和PyAudio
-        mic.stop_stream()
-        mic.close()
+        try:
+            if 'mic' in locals() and mic:
+                mic.stop_stream()
+                mic.close()
+        except Exception as e:
+            print(f"关闭麦克风时出错: {e}")
 
 
 def recv_audio():
@@ -335,23 +338,52 @@ def on_release(key):
 
 
 def run():
-    global mqtt_info, mqttc
+    global mqtt_info, mqttc, audio
+    # 初始化全局音频对象
+    try:
+        audio = pyaudio.PyAudio()
+    except Exception as e:
+        print(f"初始化音频设备失败: {e}")
+        return
+        
     # 获取mqtt与版本信息
-    get_ota_version()
+    try:
+        get_ota_version()
+    except Exception as e:
+        print(f"获取OTA版本信息失败: {e}")
+        return
+        
     # 监听键盘按键，当按下空格键时，发送listen消息
     listener = pynput_keyboard.Listener(on_press=on_press, on_release=on_release)
     listener.start()
+    
     # 创建客户端实例
-    mqttc = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id=mqtt_info['client_id'])
-    mqttc.username_pw_set(username=mqtt_info['username'], password=mqtt_info['password'])
-    mqttc.tls_set(ca_certs=None, certfile=None, keyfile=None, cert_reqs=mqtt.ssl.CERT_REQUIRED,
-                  tls_version=mqtt.ssl.PROTOCOL_TLS, ciphers=None)
-    mqttc.on_connect = on_connect
-    mqttc.on_message = on_message
-    mqttc.connect(host=mqtt_info['endpoint'], port=8883)
-    mqttc.loop_forever()
+    try:
+        mqttc = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2, client_id=mqtt_info['client_id'])
+        mqttc.username_pw_set(username=mqtt_info['username'], password=mqtt_info['password'])
+        mqttc.tls_set(ca_certs=None, certfile=None, keyfile=None, cert_reqs=mqtt.ssl.CERT_REQUIRED,
+                    tls_version=mqtt.ssl.PROTOCOL_TLS, ciphers=None)
+        mqttc.on_connect = on_connect
+        mqttc.on_message = on_message
+        mqttc.connect(host=mqtt_info['endpoint'], port=8883)
+        mqttc.loop_forever()
+    except Exception as e:
+        print(f"MQTT连接失败: {e}")
+        if audio:
+            audio.terminate()
 
 
 if __name__ == "__main__":
-    audio = pyaudio.PyAudio()
-    run()
+    try:
+        run()
+    except KeyboardInterrupt:
+        print("程序被用户中断")
+    except Exception as e:
+        print(f"程序运行出错: {e}")
+    finally:
+        # 清理资源
+        if 'audio' in globals() and audio:
+            audio.terminate()
+        if 'udp_socket' in globals() and udp_socket:
+            udp_socket.close()
+        print("程序已退出")
